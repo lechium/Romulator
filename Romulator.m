@@ -2,6 +2,8 @@
 
 #import "Romulator.h"
 #import <TVSettingsKit/TSKTextInputSettingItem.h>
+#import <MobileCoreServices/LSApplicationWorkspace.h>
+#import <MobileCoreServices/LSApplicationProxy.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -14,45 +16,81 @@
 #include <sys/stat.h>
 #include <sys/param.h>
 
-@interface TVSPreferences : NSObject
+#import "DownloadManager.h"
 
-+ (id)preferencesWithDomain:(id)arg1;
-- (_Bool)setBool:(_Bool)arg1 forKey:(id)arg2;
-- (_Bool)boolForKey:(id)arg1 defaultValue:(_Bool)arg2;
-- (_Bool)boolForKey:(id)arg1;
-- (_Bool)setDouble:(double)arg1 forKey:(id)arg2;
-- (double)doubleForKey:(id)arg1 defaultValue:(double)arg2;
-- (double)doubleForKey:(id)arg1;
-- (_Bool)setFloat:(float)arg1 forKey:(id)arg2;
-- (float)floatForKey:(id)arg1 defaultValue:(float)arg2;
-- (float)floatForKey:(id)arg1;
-- (_Bool)setInteger:(int)arg1 forKey:(id)arg2;
-- (int)integerForKey:(id)arg1 defaultValue:(int)arg2;
-- (int)integerForKey:(id)arg1;
-- (id)stringForKey:(id)arg1;
-- (_Bool)setObject:(id)arg1 forKey:(id)arg2;
-- (id)objectForKey:(id)arg1;
-- (_Bool)synchronize;
-- (id)initWithDomain:(id)arg1;
+
+@interface LSApplicationProxy (More)
++(id)applicationProxyForIdentifier:(id)arg1;
+-(BOOL)isContainerized;
+-(NSURL *)dataContainerURL;
 @end
 
-@protocol TSKSettingItemEditingControllerDelegate <NSObject>
-- (void)editingController:(id)arg1 didCancelForSettingItem:(TSKSettingItem *)arg2;
-- (void)editingController:(id)arg1 didProvideValue:(id)arg2 forSettingItem:(TSKSettingItem *)arg3;
+@interface LSApplicationWorkspace (More)
+
+-(id)allInstalledApplications;
+-(BOOL)openApplicationWithBundleID:(id)arg1;
+
 @end
 
-@interface TSKTextInputViewController : UIViewController
+@interface ROMAirDropReceiverViewController()
 
-@property (assign,nonatomic) BOOL supportsPasswordSharing;
-@property (nonatomic,retain) NSString * networkName;
-@property (assign,nonatomic) BOOL secureTextEntry;
-@property (nonatomic,copy) NSString * headerText;
-@property (nonatomic,copy) NSString * messageText;
-@property (nonatomic,copy) NSString * initialText;
-@property (assign,nonatomic) long long capitalizationType;
-@property (assign,nonatomic) long long keyboardType;
-@property (nonatomic,retain) TSKSettingItem * editingItem;
-@property (assign,nonatomic,weak) id<TSKSettingItemEditingControllerDelegate> editingDelegate;
+@property (nonatomic, strong) UIProgressView *progressView;
+
+@end
+
+@implementation ROMAirDropReceiverViewController
+
+- (void)viewDidLoad {
+    
+    [super viewDidLoad];
+     CGRect viewBounds = self.view.bounds;
+    self.progressView = [[UIProgressView alloc] initWithFrame:CGRectMake(200, viewBounds.size.height - 150, self.view.bounds.size.width-400, 30)];
+    [[self view] addSubview:self.progressView];
+    self.progressView.hidden = true;
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateProgressFromNotification:) name:@"updateProgress" object:nil];
+    
+}
+
+- (void)viewWillDisappear:(BOOL)animated
+{
+ 
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [super viewWillDisappear:animated];
+    
+}
+
+- (void)updateProgressFromNotification:(NSNotification *)n {
+    
+    
+    float progress = [n.userInfo[@"progress"] floatValue];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.progressView setHidden:false];
+        self.progressView.progress = progress;
+        if (progress >= 1.0){
+            [self.progressView setHidden:true];
+        }
+    });
+    
+    
+    
+}
+
+- (void)viewDidLayoutSubviews {
+    
+    HBLogDebug(@"viewDidLayoutSubviews");
+    [super viewDidLayoutSubviews];
+    HBLogDebug(@"subviews: %@", self.view.subviews);
+}
+
+
+@end
+
+@interface Romulator() {
+    
+    BOOL _provenanceFound;
+}
+@property (nonatomic, strong) NSString *importsPath;
+@property (nonatomic, strong) NSString *defaultBundleID;
 @end
 
 @implementation Romulator
@@ -78,50 +116,165 @@
     return lines;
 }
 
+- (void)_findProvenancePath {
+    
+    if (_provenanceFound) return;
+    
+    NSFileManager *man = [NSFileManager defaultManager];
+    NSString *appendPath = @"Library/Caches/Imports";
+    
+    //first try via the application proxy with hardcoded bundle id
+    LSApplicationProxy *provProxy = [LSApplicationProxy applicationProxyForIdentifier:self.defaultBundleID];
+    if (provProxy){
+        NSLog(@"got im: %@, dataContainerURL: %@", provProxy, [provProxy dataContainerURL]);
+        if ([provProxy isContainerized]){
+            NSLog(@"is containerized!");
+            self.importsPath = [[[provProxy dataContainerURL] path] stringByAppendingPathComponent:appendPath];
+            NSLog(@"final path: %@", self.importsPath);
+            if ([man fileExistsAtPath:self.importsPath]){
+                _provenanceFound = TRUE;
+                return;
+            } else {
+                
+                NSLog(@"this path wasnt found; %@",self.importsPath );
+                
+            }
+        }
+    }
+    LSApplicationWorkspace *workspace = [LSApplicationWorkspace defaultWorkspace];
+    NSArray *installedApplications = [workspace allInstalledApplications];
+    NSPredicate *pred = [NSPredicate predicateWithFormat:@"bundleExecutable contains[cd] %@ ", @"provenance"];
+    NSArray *filteredResults = [installedApplications filteredArrayUsingPredicate:pred];
+    if (filteredResults.count > 0){
+        
+        provProxy = filteredResults[0];
+        self.defaultBundleID = [provProxy bundleIdentifier];
+        NSLog(@"found new bundle id: %@", self.defaultBundleID);
+        if ([provProxy isContainerized]){
+            NSLog(@"is containerized!");
+            self.importsPath = [[[provProxy dataContainerURL] path] stringByAppendingPathComponent:appendPath];
+            NSLog(@"final path: %@", self.importsPath);
+            if ([man fileExistsAtPath:self.importsPath]){
+                _provenanceFound = TRUE;
+                return;
+            } else {
+                
+                NSLog(@"this path wasnt found; %@",self.importsPath );
+                
+            }
+        }
+    }
+    
+    NSError *error = nil;
+    NSString *commandString = [NSString stringWithFormat:@"find /var/mobile -path \"*Caches/%@\" | xargs dirname", self.defaultBundleID];
+    NSString *provenanceCache = [[Romulator returnForProcess:commandString] componentsJoinedByString:@""];
+    self.importsPath = [provenanceCache stringByAppendingPathComponent:@"Imports"];
+    NSLog(@"final path: %@", self.importsPath);
+    if (!provProxy.isContainerized){
+        NSURL *dataContainerURL = [NSURL fileURLWithPath:[provenanceCache stringByDeletingLastPathComponent]];
+        NSLog(@"self.dataContainerURL: %@", dataContainerURL);
+        [provProxy setValue:dataContainerURL forKey:@"_boundDataContainerURL"];
+        NSLog(@"self.dataContainerURL: %@", [provProxy dataContainerURL]);
+    }
+    if (self.importsPath && [man fileExistsAtPath:self.importsPath]){
+        _provenanceFound = TRUE;
+        
+    }
+}
+
+
+
+- (void)downloadURLManually:(NSURL *)url {
+    
+    NSString *title = [url lastPathComponent];
+    NSString *path = [url absoluteString];
+    NSDictionary *downloadDict = @{@"URL": path, @"Name": title};
+    [self sendBulletinWithMessage:[NSString stringWithFormat:@"Downloading URL: %@", title] title:@"Starting URL download..."];
+
+    [[DownloadManager sharedInstance] addDownloadsToQueue:@[downloadDict] completed:^(NSArray *downloadedFiles) {
+        
+        
+    
+        /*
+         dispatch_async(dispatch_get_main_queue(), ^{
+         
+         });
+         */
+        HBLogDebug(@"Romulator: should install packages: %@", downloadedFiles);
+        if (downloadedFiles.count > 0){
+            
+            [self sendBulletinWithMessage:[NSString stringWithFormat:@"Finished URL: %@ Successfully!", title] title:@"Download Completed!"];
+            [self processPath:downloadedFiles[0]];
+        }
+        
+        
+    }];
+}
+
+- (void)sendBulletinWithMessage:(NSString *)message title:(NSString *)title {
+    
+    NSMutableDictionary *dict = [NSMutableDictionary new];
+    dict[@"message"] = message;
+    dict[@"title"] = title;
+    dict[@"timeout"] = @2;
+    
+    NSString *imagePath = [[NSBundle bundleForClass:self.class] pathForResource:@"icon" ofType:@"jpg"];
+    UIImage *image = [UIImage imageWithContentsOfFile:imagePath];
+    NSData *imageData = UIImageJPEGRepresentation(image, 1.0);
+    if (imageData){
+        dict[@"imageData"] = imageData;
+    }
+    [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"com.nito.bulletinh4x/displayBulletin" object:nil userInfo:dict];
+    
+}
+
 - (void)processPath:(NSString *)path  {
     
+    HBLogDebug(@"ROMULATOR PROCESSPATH: %@", path);
     //NSString *path = [url path];
     NSString *fileName = path.lastPathComponent;
     NSError *error = nil;
     NSFileManager *man = [NSFileManager defaultManager];
-    NSString *provenanceCache = [[Romulator returnForProcess:@"find /var/mobile -path \"*Caches/com.provenance-emu.provenance\" | xargs dirname"] componentsJoinedByString:@""];
-    provenanceCache = [provenanceCache stringByAppendingPathComponent:@"Imports"];
-    NSLog(@"Romulator: provenance cache: %@", provenanceCache);
-    if ([man fileExistsAtPath:provenanceCache]){
+    
+    [self _findProvenancePath];
+    
+    if (_provenanceFound){
         
-       // if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"nes"]){
-            NSString *importsFile = [provenanceCache stringByAppendingPathComponent:fileName];
-            NSLog(@"importing file: %@", importsFile);
+        // if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"nes"]){
+        NSString *importsFile = [self.importsPath stringByAppendingPathComponent:fileName];
+        HBLogDebug(@"importing file: %@", importsFile);
         if ([man moveItemAtPath:path toPath:importsFile error:nil]){
             
-            NSMutableDictionary *dict = [NSMutableDictionary new];
-            dict[@"message"] = [NSString stringWithFormat:@"Imported '%@' successfully!",fileName];
-            dict[@"title"] = @"Import Successful";
-            dict[@"timeout"] = @2;
-            
-            NSString *imagePath = [[NSBundle bundleForClass:self.class] pathForResource:@"icon" ofType:@"jpg"];
-            UIImage *image = [UIImage imageWithContentsOfFile:imagePath];
-            NSData *imageData = UIImageJPEGRepresentation(image, 1.0);
-            if (imageData){
-                dict[@"imageData"] = imageData;
-            }
-            [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"com.nito.bulletinh4x/displayBulletin" object:nil userInfo:dict];
+            NSString *message = [NSString stringWithFormat:@"Imported '%@' successfully!",fileName];
+            NSString *title = @"Import Successful";
+            [self sendBulletinWithMessage:message title:title];
             
         }
-                   // }
+        // }
         
     }
     
 }
 
+
+- (void)openProvenance {
+    
+    LSApplicationWorkspace *ws = [LSApplicationWorkspace defaultWorkspace];
+    [ws openApplicationWithBundleID:self.defaultBundleID];
+    
+}
+
+
 - (void)showAirDropSharingSheet {
     
-    SFAirDropReceiverViewController *rec = [[SFAirDropReceiverViewController alloc] init];
+    NSLog(@"Romulator: main bundle: %@", [NSBundle bundleForClass:self.class]);
+    [[NSDistributedNotificationCenter defaultCenter] addObserver:self selector:@selector(airDropReceived:) name:@"com.nito.AirDropper/airDropFileReceived" object:nil];
+    ROMAirDropReceiverViewController *rec = [[ROMAirDropReceiverViewController alloc] init];
     [self presentViewController:rec animated: YES completion: nil];
     
     UILabel *ourLabel = [rec valueForKey:@"_instructionsLabel"];
     UIFont *ogFont = [ourLabel font];
-    [ourLabel setText:@"Drop any Provenance compatible rom files or archives to transfer them into the 'Imports' directory"];
+    [ourLabel setText:@"Drop any Provenance compatible rom files, archives, bios files OR download links (NEW!) to transfer them / download them into the 'Imports' directory"];
     [ourLabel setFont:ogFont];
     
     [rec startAdvertising];
@@ -140,57 +293,43 @@
         
     }];
     
+    NSArray <NSString *> *urls = userInfo[@"URLS"];
+    
+    [urls enumerateObjectsUsingBlock:^(NSString * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+        
+        [self downloadURLManually:[NSURL URLWithString:obj]];
+        
+    }];
+    
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    
+    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self name:@"com.nito.AirDropper/airDropFileReceived" object:nil];
+    [super viewWillAppear:animated];
+    NSLog(@"Romulator viewWillAppear");
+    [self _findProvenancePath];
+    
+}
 
 - (id)loadSettingGroups {
+
     
-  
-    NSLog(@"Romulator: main bundle: %@", [NSBundle bundleForClass:self.class]);
-   [[NSDistributedNotificationCenter defaultCenter] addObserver:self selector:@selector(airDropReceived:) name:@"com.nito.AirDropper/airDropFileReceived" object:nil];
+    _provenanceFound = FALSE;
+    self.defaultBundleID = @"com.provenance-emu.provenance";
+    
     id facade = [[NSClassFromString(@"TVSettingsPreferenceFacade") alloc] initWithDomain:@"com.nito.romulator" notifyChanges:TRUE];
-  
+    
     NSMutableArray *_backingArray = [NSMutableArray new];
-   TSKSettingItem *actionItem = [TSKSettingItem actionItemWithTitle:@"Start AirDrop Server" description:@"Turn on AirDrop to receive roms for importing into Provenance" representedObject:facade keyPath:@"" target:self action:@selector(showAirDropSharingSheet)];
-    //[textEntryItem setLocalizedValue:@"TEST"];
-    TSKSettingGroup *group = [TSKSettingGroup groupWithTitle:nil settingItems:@[actionItem]];
+    TSKSettingItem *actionItem = [TSKSettingItem actionItemWithTitle:@"Start AirDrop Server" description:@"Turn on AirDrop to receive roms for importing into Provenance" representedObject:facade keyPath:@"" target:self action:@selector(showAirDropSharingSheet)];
+    TSKSettingItem *openItem = [TSKSettingItem actionItemWithTitle:@"Open Provenance" description:@"A Shortcut to open Provenance" representedObject:facade keyPath:@"" target:self action:@selector(openProvenance)];
+    TSKSettingGroup *group = [TSKSettingGroup groupWithTitle:nil settingItems:@[actionItem, openItem]];
     [_backingArray addObject:group];
     [self setValue:_backingArray forKey:@"_settingGroups"];
     
     return _backingArray;
     
 }
-
-- (TVSPreferences *)ourPreferences {
-    
-    return [TVSPreferences preferencesWithDomain:@"com.nito.romulator"];
-}
-
-
-- (void)editingController:(id)arg1 didCancelForSettingItem:(TSKSettingItem *)arg2 {
-    
-    NSLog(@"Romulator: editingController %@ didCancelForSettingItem:%@", arg1, arg2);
-    [super editingController:arg1 didCancelForSettingItem:arg2];
-}
-- (void)editingController:(id)arg1 didProvideValue:(id)arg2 forSettingItem:(TSKSettingItem *)arg3 {
-    
-    NSLog(@"Romulator: editingController %@ didProvideValue: %@ forSettingItem: %@", arg1, arg2, arg3);
- 
-    [super editingController:arg1 didProvideValue:arg2 forSettingItem:arg3];
- 
-    TVSPreferences *prefs = [TVSPreferences preferencesWithDomain:@"com.nito.dalesdeadbug"];
-    
-    NSLog(@"Romulator: prefs: %@", prefs);
-    //[arg3 setLocalizedValue:arg2];
-    [prefs setObject:arg2 forKey:arg3.keyPath];
-    NSLog(@"Romulator: setObjetct: arg2 forKey: %@", arg3.keyPath);
-    [prefs synchronize];
-    NSLog(@"Romulator: after prefs sync");
-    //[self.navigationController popViewControllerAnimated:YES];
-    
-    
-}
-
 
 -(id)previewForItemAtIndexPath:(NSIndexPath *)indexPath {
     
@@ -203,7 +342,7 @@
         TSKVibrantImageView *imageView = [[TSKVibrantImageView alloc] initWithImage:icon];
         [item setContentView:imageView];
     }
-
+    
     return item;
     
 }
